@@ -40,7 +40,7 @@ curl "http://localhost:5050/subscribers?key=TWOJ_KLUCZ"
 # VPS
 
 ```bash
-git clone <repo> && cd api
+git clone <repo> && cd befreeclub-api
 python3 generate_key.py
 nano .env  # dodaj CIRCLE_ADMIN_API_V1
 ```
