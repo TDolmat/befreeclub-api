@@ -8,28 +8,8 @@ services:
       - ./data:/app/data
     restart: unless-stopped
     networks:
-      - befreeclub
-
-  caddy:
-    image: caddy:alpine
-    container_name: befreeclub-caddy
-    ports:
-      - "8090:80"
-      - "8443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - api
-    restart: unless-stopped
-    networks:
-      - befreeclub
+      - caddy_network
 
 networks:
-  befreeclub:
-    driver: bridge
-
-volumes:
-  caddy_data:
-  caddy_config:
+  caddy_network:
+    external: true

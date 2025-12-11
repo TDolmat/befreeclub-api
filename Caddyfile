@@ -1,4 +1,0 @@
-api.befreeclub.pro {
-    reverse_proxy api:5050
-}
-
