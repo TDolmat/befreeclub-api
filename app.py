@@ -1,9 +1,11 @@
 import os
+import re
 import json
 import sqlite3
 import hashlib
 import mimetypes
 import threading
+import unicodedata
 import requests
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify, send_from_directory, abort
@@ -16,6 +18,7 @@ app = Flask(__name__)
 
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 AVATARS_DIR = os.path.join(DATA_DIR, "avatars")
+STATIC_INITIALS_DIR = os.environ.get("STATIC_INITIALS_DIR", "/app/initials")
 DATABASE = os.path.join(DATA_DIR, "data.db")
 CIRCLE_TOKEN = os.getenv("CIRCLE_ADMIN_API_V1")
 API_KEY = os.getenv("API_KEY")
@@ -75,6 +78,42 @@ def init_db():
 
 def hash_email(email):
     return hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()[:16]
+
+
+_POLISH_MAP = str.maketrans({
+    "Ł": "L", "ł": "l", "Đ": "D", "đ": "d", "Ø": "O", "ø": "o",
+    "Æ": "AE", "æ": "ae", "Œ": "OE", "œ": "oe", "ß": "ss",
+})
+
+
+def asciify(s):
+    if not s:
+        return ""
+    s = s.translate(_POLISH_MAP)
+    nfkd = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _letters_only(s):
+    return re.sub(r"[^A-Z]", "", asciify(s or "").upper())
+
+
+def compute_initials(first_name, last_name, email):
+    """Return 1-2 uppercase ASCII letters. Prefers 2."""
+    first = _letters_only(first_name)
+    last = _letters_only(last_name)
+
+    if first and last:
+        return first[0] + last[0]
+    if first:
+        return first[:2]  # 2 chars if possible, else 1
+
+    # Fallback: email local part
+    local = (email or "").split("@")[0]
+    cleaned = _letters_only(local)
+    if cleaned:
+        return cleaned[:2]
+    return "X"  # extreme fallback; should never happen (email is primary key)
 
 
 def ext_from_content_type(content_type):
@@ -138,6 +177,18 @@ def bfc_avatar_url(filename):
     if not filename:
         return None
     return f"{PUBLIC_BASE_URL}/avatars/{filename}"
+
+
+def initials_url(letters):
+    return f"{PUBLIC_BASE_URL}/avatars/initials/{letters}.png"
+
+
+def avatar_url_for_member(first_name, last_name, email, avatar_filename):
+    """Return public avatar URL: real avatar file if present, else pre-generated initials PNG."""
+    if avatar_filename:
+        return bfc_avatar_url(avatar_filename)
+    letters = compute_initials(first_name, last_name, email)
+    return initials_url(letters)
 
 
 def upsert_member(member):
@@ -310,7 +361,9 @@ def sync_members_from_circle():
                 "name": rm.get("name"),
                 "first_name": rm.get("first_name"),
                 "last_name": rm.get("last_name"),
-                "avatar_url": bfc_avatar_url(avatar_filename),
+                "avatar_url": avatar_url_for_member(
+                    rm.get("first_name"), rm.get("last_name"), email, avatar_filename
+                ),
                 "headline": rm.get("headline"),
             })
             emails.append(email)
@@ -330,7 +383,9 @@ def member_row_to_public(row):
         "name": row["name"],
         "first_name": row["first_name"],
         "last_name": row["last_name"],
-        "avatar_url": bfc_avatar_url(row["avatar_filename"]),
+        "avatar_url": avatar_url_for_member(
+            row["first_name"], row["last_name"], row["email"], row["avatar_filename"]
+        ),
         "headline": row["headline"],
     }
 
@@ -404,17 +459,23 @@ def member_by_email(email):
     if auth_error:
         return auth_error
 
-    row = get_member_by_email(email)
-    if row:
-        return jsonify({"member": member_row_to_public(row), "source": "cache"})
+    use_cache = request.args.get("cache", "true").lower() != "false"
 
-    # Not found — attempt fallback refresh from Circle (rate-limited)
+    if use_cache:
+        row = get_member_by_email(email)
+        if row:
+            return jsonify({"member": member_row_to_public(row), "source": "cache"})
+
+    # Either cache=false, or not in cache — try to refresh from Circle (rate-limited)
     if not can_fallback_fetch():
+        row = get_member_by_email(email)  # stale fallback
+        if row:
+            return jsonify({"member": member_row_to_public(row), "source": "cache_stale"})
         return jsonify({
             "error": "Not found",
             "member": None,
             "source": "cache",
-            "hint": "Cache does not contain this email and fallback refresh is rate-limited.",
+            "hint": "Cache does not contain this email and Circle refresh is rate-limited.",
         }), 404
 
     sync_members_from_circle()
@@ -431,12 +492,20 @@ def subscription(email):
     if auth_error:
         return auth_error
 
-    row = get_member_by_email(email)
-    if row:
-        return jsonify({"email": email, "has_subscription": True, "source": "cache"})
+    use_cache = request.args.get("cache", "true").lower() != "false"
+
+    if use_cache:
+        row = get_member_by_email(email)
+        if row:
+            return jsonify({"email": email, "has_subscription": True, "source": "cache"})
 
     if not can_fallback_fetch():
-        return jsonify({"email": email, "has_subscription": False, "source": "cache"})
+        row = get_member_by_email(email)
+        return jsonify({
+            "email": email,
+            "has_subscription": bool(row),
+            "source": "cache_stale" if row else "cache",
+        })
 
     sync_members_from_circle()
     row = get_member_by_email(email)
@@ -447,13 +516,28 @@ def subscription(email):
     })
 
 
-@app.route("/avatars/<path:filename>", methods=["GET"])
+_INITIALS_RE = re.compile(r"^[A-Z]{1,2}$")
+
+
+@app.route("/avatars/initials/<letters>.png", methods=["GET"])
+def serve_initials(letters):
+    if not _INITIALS_RE.match(letters):
+        abort(404)
+    filepath = os.path.join(STATIC_INITIALS_DIR, f"{letters}.png")
+    if not os.path.exists(filepath):
+        abort(404)
+    response = send_from_directory(STATIC_INITIALS_DIR, f"{letters}.png", max_age=31536000)
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
+
+
+@app.route("/avatars/<filename>", methods=["GET"])
 def serve_avatar(filename):
     # Prevent path traversal; allow only simple filenames
-    if "/" in filename or ".." in filename:
+    if "/" in filename or ".." in filename or filename.startswith("."):
         abort(404)
     filepath = os.path.join(AVATARS_DIR, filename)
-    if not os.path.exists(filepath):
+    if not os.path.exists(filepath) or not os.path.isfile(filepath):
         abort(404)
     return send_from_directory(AVATARS_DIR, filename, max_age=86400)
 

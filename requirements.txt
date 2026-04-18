@@ -3,3 +3,5 @@ requests==2.31.0
 python-dotenv==1.0.0
 gunicorn==21.2.0
 APScheduler==3.10.4
+# Pillow is only needed to regenerate ./initials/ via scripts/generate_initials.py
+# (not a runtime dependency — pre-generated PNGs ship with the image)

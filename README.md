@@ -44,13 +44,27 @@ requests.get(
 | GET | `/health` | Status API + timestamp ostatniego fetchu |
 
 Parametry query:
-- `cache=false` — wymusza odświeżenie z Circle (tylko `/subscribers` i `/members`)
+- `cache=false` — wymusza odświeżenie z Circle. Respektuje `FALLBACK_MIN_INTERVAL_MINUTES` — jeśli ostatni pełny fetch był <1h temu, zwraca dane z cache z `source: "cache_stale"` zamiast bić w Circle. Działa na: `/subscribers`, `/members`, `/members/<email>`, `/subscription/<email>`
 
 ### Publiczne (bez API key)
 
 | Method | Path | Opis |
 |--------|------|------|
 | GET | `/avatars/<filename>` | Serwuje pliki avatarów (`<sha256(email)[:16]>.jpg/png/...`) |
+| GET | `/avatars/initials/<XX>.png` | PNG z inicjałami (fallback dla userów bez avatara) |
+
+**Inicjały** (`/avatars/initials/<XX>.png`):
+- 1-2 litery ASCII uppercase (np. `JK`, `YO`, `Y`)
+- **Pre-generowane** — wszystkie 702 kombinacje (`A`-`Z` + `AA`-`ZZ`) są w `./initials/` w repo i COPY do obrazu Dockera
+- Tło `#f0dd8a` (brand color), tekst `#191B1F`, 256×256
+- Immutable cache (`max-age=31536000`)
+- Regeneracja: `pip install Pillow && python scripts/generate_initials.py`
+
+Logika wyboru inicjałów (w `/members` i `/members/<email>` API wybiera URL automatycznie):
+1. `first_name[0] + last_name[0]` — np. "Jan Kowalski" → `JK`
+2. Tylko `first_name` → pierwsze 2 litery — np. "Agnieszka" → `AG`
+3. Brak imienia/nazwiska → pierwsze 2 litery lokalnej części emaila — np. "john.doe@x.com" → `JO`
+4. Znaki polskie są transliterowane (Ż→Z, Ł→L, itd.)
 
 ## Przykłady
 
